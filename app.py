@@ -260,7 +260,8 @@ def inject_logo_picker_support():
             border: 1px solid rgba(49, 51, 63, 0.2);
             border-radius: 0.5rem;
             padding: 0.45rem 0.7rem;
-            background: white;
+            background: var(--secondary-background-color, rgba(255, 255, 255, 0.08));
+            color: var(--text-color, inherit);
             font-weight: 600;
         }
         .team-picker summary::-webkit-details-marker {
@@ -272,8 +273,9 @@ def inject_logo_picker_support():
             width: 260px;
             max-height: 320px;
             overflow-y: auto;
-            background: white;
-            border: 1px solid rgba(49, 51, 63, 0.18);
+            background: var(--background-color, #ffffff);
+            color: var(--text-color, inherit);
+            border: 1px solid color-mix(in srgb, var(--text-color, #000000) 18%, transparent);
             border-radius: 0.75rem;
             box-shadow: 0 10px 30px rgba(0, 0, 0, 0.16);
             padding: 0.8rem;
@@ -286,6 +288,9 @@ def inject_logo_picker_support():
             display: grid;
             grid-template-columns: repeat(4, minmax(0, 1fr));
             gap: 0.7rem 0.4rem;
+        }
+        .team-picker a:hover img {
+            filter: brightness(1.06);
         }
         </style>
         """,
@@ -1719,8 +1724,8 @@ def create_ranking_figure(ranking_df, week_labels, title, subtitle, ascending):
         arrowprops=dict(arrowstyle="->", color="black", linewidth=1.8),
         annotation_clip=False,
     )
-    ax.text(1.09, 0.98, "Best", transform=ax.transAxes, ha="left", va="center", fontsize=7.5, fontweight="bold")
-    ax.text(1.09, 0.02, "Worst", transform=ax.transAxes, ha="left", va="center", fontsize=7.5, fontweight="bold")
+    ax.text(1.055, 1.02, "Best", transform=ax.transAxes, ha="center", va="bottom", fontsize=7.5, fontweight="bold")
+    ax.text(1.055, -0.02, "Worst", transform=ax.transAxes, ha="center", va="top", fontsize=7.5, fontweight="bold")
 
     ax.set_title(title, fontsize=10.5, fontweight="bold", pad=5)
     ax.text(0.5, 0.985, subtitle, fontsize=7.4, ha="center", transform=ax.transAxes, wrap=True)
