@@ -237,6 +237,8 @@ def latest_completed_season(today):
 
 
 LATEST_COMPLETED_SEASON = latest_completed_season(CURRENT_DATE)
+MIN_SEASON = 2006
+MAX_RANKINGS_SEASON = 2025
 DEFAULT_SEASONS = list(range(LATEST_COMPLETED_SEASON - 4, LATEST_COMPLETED_SEASON + 1))
 ALL_GAMES_PAGE_SIZE = 50
 PAGINATED_VIEW_MODES = {"all_games", "all_primetime", "all_playoffs", "team_games"}
@@ -336,54 +338,6 @@ def render_logo_team_picker(state_key, title):
     selected_team = st.session_state.get(widget_key)
     st.session_state[state_key] = selected_team
     return selected_team
-
-
-def sync_ui_state_from_query():
-    app_page_label = st.query_params.get("app_page")
-    if app_page_label in APP_PAGES and "app_page_label" not in st.session_state:
-        st.session_state["app_page_label"] = app_page_label
-
-    start_value = st.query_params.get("season_start")
-    end_value = st.query_params.get("season_end")
-    if start_value and end_value and "season_range" not in st.session_state:
-        try:
-            start_year = max(2006, min(int(start_value), LATEST_COMPLETED_SEASON))
-            end_year = max(2006, min(int(end_value), LATEST_COMPLETED_SEASON))
-            if start_year > end_year:
-                start_year, end_year = end_year, start_year
-            st.session_state["season_range"] = (start_year, end_year)
-        except ValueError:
-            pass
-
-    page_value = st.query_params.get("page")
-    if page_value and "all_games_page" not in st.session_state:
-        try:
-            st.session_state["all_games_page"] = max(1, int(page_value))
-        except ValueError:
-            pass
-
-def sync_query_params_to_state():
-    params = {}
-    app_page_label = st.session_state.get("app_page_label")
-    if app_page_label:
-        params["app_page"] = app_page_label
-
-    season_range = st.session_state.get("season_range")
-    if season_range:
-        params["season_start"] = str(season_range[0])
-        params["season_end"] = str(season_range[1])
-    current_view_label = st.session_state.get("view_mode_label")
-    current_view_mode = VIEW_MODES.get(current_view_label, "")
-    if app_page_label == "Game Explorer" and current_view_mode in PAGINATED_VIEW_MODES:
-        params["page"] = str(max(1, int(st.session_state.get("all_games_page", 1))))
-
-    current_params = {key: str(value) for key, value in st.query_params.items()}
-    target_params = {key: str(value) for key, value in params.items()}
-    if current_params != target_params:
-        st.query_params.clear()
-        for key, value in target_params.items():
-            st.query_params[key] = value
-
 
 def detect_schedule_loader():
     if nfl is None:
@@ -1515,13 +1469,69 @@ def fetch_logo_image_bytes(team):
         return None
 
 
-def build_rankings_dataset(pbp_df, seasons):
+def build_rankings_week_labels(rankings_df):
+    week_points = (
+        rankings_df[["season", "week"]]
+        .dropna()
+        .drop_duplicates()
+        .sort_values(["season", "week"])
+        .reset_index(drop=True)
+    )
+    if week_points.empty:
+        return [], pd.DataFrame()
+
+    week_points["week_index"] = range(1, len(week_points) + 1)
+    week_labels = [
+        {
+            "season": int(row["season"]),
+            "week": int(row["week"]),
+            "week_index": int(row["week_index"]),
+        }
+        for _, row in week_points.iterrows()
+    ]
+    return week_labels, week_points
+
+
+def summarize_rankings_side(rankings_df, side_col, week_labels, ascending):
+    weekly = (
+        rankings_df.groupby([side_col, "season", "week"], as_index=False)
+        .agg(total_epa=("epa", "sum"), play_count=("epa", "size"))
+    )
+    weekly = weekly.rename(columns={side_col: "team"})
+    team_week_grid = pd.DataFrame(
+        [(team, label["season"], label["week"], label["week_index"]) for team in TEAM_OPTIONS for label in week_labels],
+        columns=["team", "season", "week", "week_index"],
+    )
+    weekly = team_week_grid.merge(
+        weekly[["team", "season", "week", "total_epa", "play_count"]],
+        on=["team", "season", "week"],
+        how="left",
+    )
+    weekly["total_epa"] = weekly["total_epa"].fillna(0.0)
+    weekly["play_count"] = weekly["play_count"].fillna(0.0)
+    weekly = weekly.sort_values(["team", "season", "week"]).reset_index(drop=True)
+
+    weekly["cum_epa"] = weekly.groupby("team")["total_epa"].cumsum()
+    weekly["cum_plays"] = weekly.groupby("team")["play_count"].cumsum()
+    weekly["epa_per_play"] = weekly["total_epa"].div(weekly["play_count"].where(weekly["play_count"].ne(0))).fillna(0.0)
+    weekly["cumulative_epa_per_play"] = weekly["cum_epa"].div(weekly["cum_plays"].where(weekly["cum_plays"].ne(0))).fillna(0.0)
+    weekly["rank"] = weekly.groupby("week_index")["cumulative_epa_per_play"].rank(
+        ascending=ascending,
+        method="first",
+    )
+    return weekly
+
+
+@st.cache_data(show_spinner=False)
+def compute_cached_weekly_team_summaries(seasons_key):
+    seasons = list(seasons_key)
+    pbp_df, pbp_err = load_pbp_data(seasons)
     if is_empty_frame(pbp_df):
-        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), []
+        return pd.DataFrame(), pd.DataFrame(), [], pbp_err
 
     required_cols = ["posteam", "defteam", "week", "season", "play_type", "epa"]
     if any(col not in pbp_df.columns for col in required_cols):
-        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), []
+        return pd.DataFrame(), pd.DataFrame(), [], "Missing required play-by-play columns for team rankings."
 
     rankings_df = pbp_df.copy()
     rankings_df["season"] = pd.to_numeric(rankings_df["season"], errors="coerce")
@@ -1546,72 +1556,36 @@ def build_rankings_dataset(pbp_df, seasons):
     ].copy()
 
     if rankings_df.empty:
-        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), []
+        return pd.DataFrame(), pd.DataFrame(), [], None
 
-    week_points = (
-        rankings_df[["season", "week"]]
-        .dropna()
-        .drop_duplicates()
-        .sort_values(["season", "week"])
-        .reset_index(drop=True)
-    )
+    week_labels, week_points = build_rankings_week_labels(rankings_df)
     if week_points.empty:
+        return pd.DataFrame(), pd.DataFrame(), [], None
+
+    offense = summarize_rankings_side(rankings_df, "posteam", week_labels, ascending=False)
+    defense = summarize_rankings_side(rankings_df, "defteam", week_labels, ascending=True)
+    return offense, defense, week_labels, None
+
+
+def build_rankings_dataset(offense, defense, week_labels):
+    if offense.empty or defense.empty or not week_labels:
         return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), []
 
-    week_points["week_index"] = range(1, len(week_points) + 1)
-    week_labels = [
-        {
-            "season": int(row["season"]),
-            "week": int(row["week"]),
-            "week_index": int(row["week_index"]),
-        }
-        for _, row in week_points.iterrows()
-    ]
-
-    def summarize(side_col, ascending):
-        weekly = (
-            rankings_df.groupby([side_col, "season", "week"], as_index=False)
-            .agg(total_epa=("epa", "sum"), play_count=("epa", "size"))
-        )
-        weekly = weekly.rename(columns={side_col: "team"})
-        team_week_grid = pd.DataFrame(
-            [(team, label["season"], label["week"], label["week_index"]) for team in TEAM_OPTIONS for label in week_labels],
-            columns=["team", "season", "week", "week_index"],
-        )
-        weekly = team_week_grid.merge(
-            weekly[["team", "season", "week", "total_epa", "play_count"]],
-            on=["team", "season", "week"],
-            how="left",
-        )
-        weekly["total_epa"] = weekly["total_epa"].fillna(0.0)
-        weekly["play_count"] = weekly["play_count"].fillna(0.0)
-        weekly = weekly.sort_values(["team", "season", "week"]).reset_index(drop=True)
-
-        weekly["cum_epa"] = weekly.groupby("team")["total_epa"].cumsum()
-        weekly["cum_plays"] = weekly.groupby("team")["play_count"].cumsum()
-        weekly["epa_per_play"] = weekly["total_epa"].div(weekly["play_count"].where(weekly["play_count"].ne(0))).fillna(0.0)
-        weekly["cumulative_epa_per_play"] = weekly["cum_epa"].div(weekly["cum_plays"].where(weekly["cum_plays"].ne(0))).fillna(0.0)
-        weekly["rank"] = weekly.groupby("week_index")["cumulative_epa_per_play"].rank(
-            ascending=ascending,
-            method="first",
-        )
-        return weekly
-
-    offense = summarize("posteam", ascending=False)
-    defense = summarize("defteam", ascending=True)
     overall = offense.merge(
-        defense[["team", "season", "week", "week_index", "cumulative_epa_per_play"]],
+        defense[["team", "season", "week", "week_index", "cumulative_epa_per_play", "rank"]],
         on=["team", "season", "week", "week_index"],
         how="inner",
         suffixes=("_offense", "_defense"),
     )
-    overall["cumulative_epa_per_play"] = (
-        overall["cumulative_epa_per_play_offense"] - overall["cumulative_epa_per_play_defense"]
-    )
-    overall["rank"] = overall.groupby("week_index")["cumulative_epa_per_play"].rank(
-        ascending=False,
-        method="first",
-    )
+    overall["average_rank"] = (
+        overall["rank_offense"] + overall["rank_defense"]
+    ) / 2.0
+    overall = overall.sort_values(
+        ["week_index", "average_rank", "rank_offense", "team"],
+        ascending=[True, True, True, True],
+    ).reset_index(drop=True)
+    overall["rank"] = overall.groupby("week_index").cumcount() + 1
+    overall["cumulative_epa_per_play"] = -overall["average_rank"]
 
     return offense, defense, overall, week_labels
 
@@ -1709,15 +1683,15 @@ def create_ranking_figure(ranking_df, week_labels, title, subtitle, ascending):
 
     if week_count <= 18:
         tick_positions = [label["week_index"] for label in week_labels]
-        tick_labels = [f"{str(label['season'])[-2:]}-{label['week']}" for label in week_labels]
+        tick_labels = [str(label["week"]) for label in week_labels]
     else:
         sampled = week_labels[:: max(1, week_count // 8)]
         if sampled[-1]["week_index"] != week_labels[-1]["week_index"]:
             sampled.append(week_labels[-1])
         tick_positions = [label["week_index"] for label in sampled]
-        tick_labels = [f"{str(label['season'])[-2:]}-{label['week']}" for label in sampled]
+        tick_labels = [str(label["week"]) for label in sampled]
     ax.set_xticks(tick_positions)
-    ax.set_xticklabels(tick_labels, rotation=45, ha="right", fontsize=8)
+    ax.set_xticklabels(tick_labels, rotation=0, ha="center", fontsize=8)
     ax.set_yticks([])
 
     season_breaks = []
@@ -1742,7 +1716,7 @@ def create_ranking_figure(ranking_df, week_labels, title, subtitle, ascending):
     ax.text(1.055, -0.02, "Worst", transform=ax.transAxes, ha="center", va="top", fontsize=7.5, fontweight="bold")
 
     ax.set_title(title, fontsize=10.5, fontweight="bold", pad=5)
-    ax.set_xlabel("Season-Week", fontsize=8.5, labelpad=4)
+    ax.set_xlabel("Week", fontsize=8.5, labelpad=4)
 
     ax.spines["top"].set_visible(False)
     ax.spines["right"].set_visible(False)
@@ -1752,41 +1726,49 @@ def create_ranking_figure(ranking_df, week_labels, title, subtitle, ascending):
 
 
 def render_team_rankings_page(seasons):
+    selected_season = seasons[0]
     with st.spinner("Loading play-by-play for team rankings..."):
-        pbp_df, pbp_err = load_pbp_data(seasons)
+        offense_rankings, defense_rankings, week_labels, pbp_err = compute_cached_weekly_team_summaries(tuple(seasons))
 
-    if is_empty_frame(pbp_df):
-        st.error(f"Could not load play-by-play data for {seasons[0]}-{seasons[-1]}. {pbp_err or ''}")
+    if offense_rankings.empty or defense_rankings.empty:
+        if pbp_err:
+            st.error(f"Could not load play-by-play data for {selected_season}. {pbp_err}")
+        else:
+            st.warning(f"No pass/run play data was available to build team rankings for {selected_season}.")
         return
 
-    offense_rankings, defense_rankings, overall_rankings, week_labels = build_rankings_dataset(pbp_df, seasons)
+    offense_rankings, defense_rankings, overall_rankings, week_labels = build_rankings_dataset(
+        offense_rankings,
+        defense_rankings,
+        week_labels,
+    )
     if offense_rankings.empty or defense_rankings.empty or overall_rankings.empty:
-        st.warning("No pass/run play data was available to build team rankings for that range.")
+        st.warning(f"No pass/run play data was available to build team rankings for {selected_season}.")
         return
 
     st.caption(
-        f"Showing cumulative EPA per play rankings from {seasons[0]} through {seasons[-1]}. "
+        f"Showing cumulative EPA per play rankings for the {selected_season} regular season. "
         "Offense ranks best-to-worst by higher EPA/play; defense ranks best-to-worst by lower EPA/play allowed; "
-        "overall ranks by offensive EPA/play minus defensive EPA/play allowed."
+        "overall ranks by averaging each team's offensive and defensive ranks, with the better offensive rank breaking ties."
     )
 
     chart_specs = [
         (
             offense_rankings,
-            "Offense Rankings",
+            f"{selected_season} Offensive Rankings",
             "Cumulative offensive EPA / play",
             False,
         ),
         (
             defense_rankings,
-            "Defense Rankings",
+            f"{selected_season} Defensive Rankings",
             "Cumulative defensive EPA / play allowed",
             True,
         ),
         (
             overall_rankings,
-            "Overall Rankings",
-            "Offensive EPA/play minus defensive EPA/play allowed",
+            f"{selected_season} Overall Rankings",
+            "Average of offensive and defensive ranks; offense wins ties",
             False,
         ),
     ]
@@ -1873,16 +1855,16 @@ def open_game_dialog(selected_game, team1, team2):
 
     _dialog()
 
-
-sync_ui_state_from_query()
-
 if "app_page_label" not in st.session_state:
     st.session_state["app_page_label"] = "Game Explorer"
 
 if "season_range" not in st.session_state:
-    default_start = min(max(2006, 2024), LATEST_COMPLETED_SEASON)
+    default_start = min(max(MIN_SEASON, 2024), LATEST_COMPLETED_SEASON)
     default_end = min(max(default_start, 2025), LATEST_COMPLETED_SEASON)
     st.session_state["season_range"] = (default_start, default_end)
+
+if "saved_team_rankings_season" not in st.session_state:
+    st.session_state["saved_team_rankings_season"] = MAX_RANKINGS_SEASON
 
 with st.sidebar:
     selected_app_page_label = st.session_state["app_page_label"]
@@ -1910,22 +1892,33 @@ with st.sidebar:
         selected_view_mode = VIEW_MODES.get(st.session_state.get("view_mode_label", "Matchup"), "matchup")
         tm1 = None
         tm2 = None
-    season_range = st.slider(
-        "Season range",
-        min_value=2006,
-        max_value=LATEST_COMPLETED_SEASON,
-        key="season_range",
-    )
-
-sync_query_params_to_state()
-
+    if selected_app_page == "team_rankings":
+        ranking_season_options = list(range(MAX_RANKINGS_SEASON, MIN_SEASON - 1, -1))
+        current_ranking_season = st.session_state.get("saved_team_rankings_season", MAX_RANKINGS_SEASON)
+        selected_ranking_season = st.selectbox(
+            "Season",
+            options=ranking_season_options,
+            index=ranking_season_options.index(current_ranking_season),
+            key="team_rankings_season",
+        )
+        st.session_state["saved_team_rankings_season"] = selected_ranking_season
+    else:
+        st.slider(
+            "Season range",
+            min_value=MIN_SEASON,
+            max_value=LATEST_COMPLETED_SEASON,
+            key="season_range",
+        )
 if selected_app_page == "team_rankings":
     render_page_heading("NFL Team Rankings")
 else:
     render_page_heading("NFL Game Explorer")
 
-start_season, end_season = st.session_state["season_range"]
-seasons = list(range(start_season, end_season + 1))
+if selected_app_page == "team_rankings":
+    seasons = [st.session_state["saved_team_rankings_season"]]
+else:
+    start_season, end_season = st.session_state["season_range"]
+    seasons = list(range(start_season, end_season + 1))
 
 if selected_app_page == "team_rankings":
     render_team_rankings_page(seasons)
