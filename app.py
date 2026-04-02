@@ -593,6 +593,7 @@ def prepare_game_catalog(schedule_df, view_mode, team1=None, team2=None):
         games = games[
             ((games["home_team"] == team1) | (games["away_team"] == team1))
             & games["is_primetime"]
+            & ~games["is_playoff"]
         ].copy()
     elif view_mode == "team_playoffs":
         games = games[games["is_playoff"]].copy()
@@ -611,7 +612,7 @@ def prepare_game_catalog(schedule_df, view_mode, team1=None, team2=None):
     elif view_mode == "all_playoffs":
         games = games[games["is_playoff"]].copy()
     elif view_mode == "all_primetime":
-        games = games[games["is_primetime"]].copy()
+        games = games[games["is_primetime"] & ~games["is_playoff"]].copy()
     elif view_mode == "all_games":
         games = games.copy()
     else:
