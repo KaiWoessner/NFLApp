@@ -2,8 +2,6 @@ from datetime import datetime
 import time
 from io import BytesIO
 import urllib.request
-from urllib.parse import urlencode
-
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
 import matplotlib.patheffects as pe
@@ -109,6 +107,41 @@ TEAM_OPTIONS = [
     "NYJ", "PHI", "PIT", "SEA", "SF", "TB", "TEN", "WAS",
 ]
 
+TEAM_NAMES = {
+    "ARI": "Cardinals",
+    "ATL": "Falcons",
+    "BAL": "Ravens",
+    "BUF": "Bills",
+    "CAR": "Panthers",
+    "CHI": "Bears",
+    "CIN": "Bengals",
+    "CLE": "Browns",
+    "DAL": "Cowboys",
+    "DEN": "Broncos",
+    "DET": "Lions",
+    "GB": "Packers",
+    "HOU": "Texans",
+    "IND": "Colts",
+    "JAX": "Jaguars",
+    "KC": "Chiefs",
+    "LAC": "Chargers",
+    "LAR": "Rams",
+    "LV": "Raiders",
+    "MIA": "Dolphins",
+    "MIN": "Vikings",
+    "NE": "Patriots",
+    "NO": "Saints",
+    "NYG": "Giants",
+    "NYJ": "Jets",
+    "PHI": "Eagles",
+    "PIT": "Steelers",
+    "SEA": "Seahawks",
+    "SF": "49ers",
+    "TB": "Buccaneers",
+    "TEN": "Titans",
+    "WAS": "Commanders",
+}
+
 DIVISIONS = {
     "AFC East": {"BUF", "MIA", "NE", "NYJ"},
     "AFC North": {"BAL", "CIN", "CLE", "PIT"},
@@ -127,11 +160,15 @@ TEAM_TO_DIVISION = {
 }
 
 VIEW_MODES = {
-    "Matchup": "matchup",
-    "Team Games": "team",
-    "Divisional Games": "division",
-    "Playoff Games": "playoffs",
-    "All Games": "all",
+    "All Games": "all_games",
+    "Primetime Games": "all_primetime",
+    "Playoff Games": "all_playoffs",
+    "Team Games": "team_games",
+    "Team Primetime Games": "team_primetime",
+    "Team Playoff Games": "team_playoffs",
+    "Team Divisional Games": "team_divisional",
+    "Divisional Games": "divisional_games",
+    "Matchups": "matchup",
 }
 
 APP_PAGES = {
@@ -202,6 +239,7 @@ def latest_completed_season(today):
 LATEST_COMPLETED_SEASON = latest_completed_season(CURRENT_DATE)
 DEFAULT_SEASONS = list(range(LATEST_COMPLETED_SEASON - 4, LATEST_COMPLETED_SEASON + 1))
 ALL_GAMES_PAGE_SIZE = 50
+PAGINATED_VIEW_MODES = {"all_games", "all_primetime", "all_playoffs", "team_games"}
 FIELD_CHART_FIGSIZE = (16, 5.2)
 WP_CHART_FIGSIZE = (16, 4.8)
 
@@ -232,6 +270,10 @@ def logo_url(team):
     return f"https://a.espncdn.com/i/teamlogos/nfl/500/{slug}.png"
 
 
+def nfl_logo_url():
+    return "https://a.espncdn.com/i/teamlogos/leagues/500/nfl.png"
+
+
 def display_team_abbr(team):
     normalized = normalize_team_abbr(team)
     if normalized in TEAM_LOGO_SLUGS:
@@ -239,118 +281,67 @@ def display_team_abbr(team):
     return canonical_team_abbr(normalized)
 
 
-def inject_logo_picker_support():
-    st.markdown(
-        """
-        <style>
-        [data-testid="stSidebar"],
-        [data-testid="stSidebarContent"] {
-            overflow: visible !important;
-        }
-        .team-picker {
-            position: relative;
-            margin-bottom: 0.5rem;
-        }
-        .team-picker details {
-            position: relative;
-        }
-        .team-picker summary {
-            list-style: none;
-            cursor: pointer;
-            border: 1px solid rgba(49, 51, 63, 0.2);
-            border-radius: 0.5rem;
-            padding: 0.45rem 0.7rem;
-            background: var(--secondary-background-color, rgba(255, 255, 255, 0.08));
-            color: var(--text-color, inherit);
-            font-weight: 600;
-        }
-        .team-picker summary::-webkit-details-marker {
-            display: none;
-        }
-        .team-picker .panel {
-            display: none;
-            position: fixed;
-            width: 260px;
-            max-height: 320px;
-            overflow-y: auto;
-            background: var(--background-color, #ffffff);
-            color: var(--text-color, inherit);
-            border: 1px solid color-mix(in srgb, var(--text-color, #000000) 18%, transparent);
-            border-radius: 0.75rem;
-            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.16);
-            padding: 0.8rem;
-            z-index: 99999;
-        }
-        .team-picker details[open] .panel {
-            display: block;
-        }
-        .team-picker .grid {
-            display: grid;
-            grid-template-columns: repeat(4, minmax(0, 1fr));
-            gap: 0.7rem 0.4rem;
-        }
-        .team-picker a:hover img {
-            filter: brightness(1.06);
-        }
-        </style>
-        """,
-        unsafe_allow_html=True,
-    )
-
-
 def render_logo_team_picker(state_key, title):
-    selected_team = st.session_state.get(state_key)
-    selected_label = selected_team if selected_team else "Select team"
+    options = [None] + TEAM_OPTIONS
+    widget_key = f"{state_key}_widget"
+    if state_key in st.session_state and widget_key not in st.session_state:
+        existing_value = st.session_state.get(state_key)
+        st.session_state[widget_key] = existing_value if existing_value in TEAM_OPTIONS else None
+    elif widget_key not in st.session_state:
+        st.session_state[widget_key] = None
+    elif st.session_state[widget_key] not in options:
+        st.session_state[widget_key] = None
 
-    if selected_team:
+    selected_team = st.session_state.get(widget_key)
+    picker_cols = st.columns([0.28, 1])
+    with picker_cols[0]:
+        current_logo_url = logo_url(selected_team) if selected_team else nfl_logo_url()
         st.markdown(
             f"""
-            <div style="display:flex;align-items:center;gap:8px;margin-bottom:0.35rem;">
-                <strong>{title}</strong>
-                <img src="{logo_url(selected_team)}" style="width:28px;height:28px;object-fit:contain;" />
-                <span style="font-weight:700;">{selected_team}</span>
+            <div style="height:44px;display:flex;align-items:center;justify-content:center;">
+                <img src="{current_logo_url}" style="width:40px;height:40px;object-fit:contain;" />
             </div>
             """,
             unsafe_allow_html=True,
         )
-    else:
-        st.markdown(f"**{title}**")
+    with picker_cols[1]:
+        header_text = TEAM_NAMES.get(selected_team, selected_team) if selected_team else title
+        header_color = TEAM_COLORS.get(selected_team, "#31333F") if selected_team else "var(--text-color, #31333F)"
+        if selected_team:
+            st.markdown(
+                (
+                    "<div style='height:24px;display:flex;align-items:flex-end;margin-bottom:0.2rem;'>"
+                    f"<span style='font-weight:800;color:{header_color};'>{header_text}</span>"
+                    "</div>"
+                ),
+                unsafe_allow_html=True,
+            )
+        else:
+            st.markdown(
+                (
+                    "<div style='height:24px;display:flex;align-items:flex-end;margin-bottom:0.2rem;'>"
+                    f"<span style='font-weight:700;color:{header_color};'>{header_text}</span>"
+                    "</div>"
+                ),
+                unsafe_allow_html=True,
+            )
 
-    tiles_html = "".join(
-        f"""<a href="{team_picker_href(state_key, team)}" target="_self"
-           style="text-decoration:none;color:inherit;text-align:center;display:block;">
-            <img src="{logo_url(team)}"
-                 style="width:54px;height:54px;object-fit:contain;display:block;margin:0 auto;" />
-        </a>"""
-        for team in TEAM_OPTIONS
-    )
-
-    st.markdown(
-        f"""<div class="team-picker {state_key}-picker">
-            <details>
-                <summary>{selected_label}</summary>
-                <div class="panel"><div class="grid">{tiles_html}</div></div>
-            </details>
-        </div>""",
-        unsafe_allow_html=True,
-    )
-
-    return st.session_state.get(state_key)
+        st.selectbox(
+            label=title,
+            options=options,
+            format_func=lambda team: TEAM_NAMES.get(team, team) if team else "Select team",
+            key=widget_key,
+            label_visibility="collapsed",
+        )
+    selected_team = st.session_state.get(widget_key)
+    st.session_state[state_key] = selected_team
+    return selected_team
 
 
 def sync_ui_state_from_query():
     app_page_label = st.query_params.get("app_page")
     if app_page_label in APP_PAGES and "app_page_label" not in st.session_state:
         st.session_state["app_page_label"] = app_page_label
-
-    view_label = st.query_params.get("view")
-    if view_label in VIEW_MODES and "view_mode_label" not in st.session_state:
-        st.session_state["view_mode_label"] = view_label
-
-    for state_key in ("selected_team_1", "selected_team_2"):
-        query_value = st.query_params.get(state_key)
-        if query_value in TEAM_OPTIONS and state_key not in st.session_state:
-            st.session_state[state_key] = query_value
 
     start_value = st.query_params.get("season_start")
     end_value = st.query_params.get("season_end")
@@ -371,50 +362,19 @@ def sync_ui_state_from_query():
         except ValueError:
             pass
 
-
-def team_picker_href(state_key, team):
-    params = {}
-    app_page_label = st.session_state.get("app_page_label")
-    if app_page_label:
-        params["app_page"] = app_page_label
-    view_label = st.session_state.get("view_mode_label")
-    if app_page_label == "Game Explorer" and view_label:
-        params["view"] = view_label
-    keys = ("selected_team_1", "selected_team_2") if view_label == "Matchup" else ("selected_team_1",)
-    for key in keys:
-        current_value = st.session_state.get(key)
-        if current_value:
-            params[key] = current_value
-    season_range = st.session_state.get("season_range")
-    if season_range:
-        params["season_start"] = season_range[0]
-        params["season_end"] = season_range[1]
-    params[state_key] = team
-    return f"?{urlencode(params)}"
-
-
 def sync_query_params_to_state():
     params = {}
     app_page_label = st.session_state.get("app_page_label")
     if app_page_label:
         params["app_page"] = app_page_label
 
-    view_label = st.session_state.get("view_mode_label")
-    if app_page_label == "Game Explorer" and view_label:
-        params["view"] = view_label
-
-    selected_team_1 = st.session_state.get("selected_team_1")
-    selected_team_2 = st.session_state.get("selected_team_2")
-    if app_page_label == "Game Explorer" and selected_team_1:
-        params["selected_team_1"] = selected_team_1
-    if app_page_label == "Game Explorer" and view_label == "Matchup" and selected_team_2:
-        params["selected_team_2"] = selected_team_2
-
     season_range = st.session_state.get("season_range")
     if season_range:
         params["season_start"] = str(season_range[0])
         params["season_end"] = str(season_range[1])
-    if app_page_label == "Game Explorer" and view_label == "All Games":
+    current_view_label = st.session_state.get("view_mode_label")
+    current_view_mode = VIEW_MODES.get(current_view_label, "")
+    if app_page_label == "Game Explorer" and current_view_mode in PAGINATED_VIEW_MODES:
         params["page"] = str(max(1, int(st.session_state.get("all_games_page", 1))))
 
     current_params = {key: str(value) for key, value in st.query_params.items()}
@@ -521,6 +481,41 @@ def first_existing(df, candidates, default=None):
     return default
 
 
+def detect_primetime_games(games):
+    weekday_col = first_existing(games, ["weekday", "game_day", "day"])
+    gametime_col = first_existing(games, ["gametime", "game_time", "start_time", "start_time_eastern"])
+
+    if weekday_col:
+        weekday_values = games[weekday_col].astype(str).str.strip().str.upper()
+    else:
+        weekday_values = pd.Series("", index=games.index, dtype="object")
+
+    if gametime_col:
+        gametime_values = games[gametime_col].astype(str).str.strip().str.upper()
+    else:
+        gametime_values = pd.Series("", index=games.index, dtype="object")
+
+    sunday_mask = weekday_values.isin({"SUN", "SUNDAY"})
+
+    # Treat only the normal regional Sunday windows as non-primetime:
+    # about 10am PT and 1pm PT, which are typically 1:00/1:05/1:25 PM ET
+    # and 4:05/4:25 PM ET in NFL schedule data.
+    sunday_regular_window = gametime_values.str.contains(
+        (
+            r"(?:"
+            r"1:00(?:\s*PM)?|1:05(?:\s*PM)?|1:25(?:\s*PM)?|"
+            r"4:05(?:\s*PM)?|4:25(?:\s*PM)?|"
+            r"10:00(?:\s*AM)?|10:05(?:\s*AM)?|10:25(?:\s*AM)?|"
+            r"13:00|13:05|13:25|16:05|16:25"
+            r")"
+        ),
+        regex=True,
+        na=False,
+    )
+
+    return ~(sunday_mask & sunday_regular_window)
+
+
 def prepare_game_catalog(schedule_df, view_mode, team1=None, team2=None):
     if schedule_df.empty:
         return pd.DataFrame()
@@ -564,6 +559,8 @@ def prepare_game_catalog(schedule_df, view_mode, team1=None, team2=None):
     games["is_playoff"] = games["game_type"].ne("REG")
     games["division_home"] = games["home_team"].map(TEAM_TO_DIVISION)
     games["division_away"] = games["away_team"].map(TEAM_TO_DIVISION)
+    games["is_divisional"] = games["division_home"].notna() & games["division_home"].eq(games["division_away"])
+    games["is_primetime"] = detect_primetime_games(games)
     games["went_ot"] = False
 
     if overtime_col:
@@ -586,22 +583,36 @@ def prepare_game_catalog(schedule_df, view_mode, team1=None, team2=None):
             | ((games["home_team"] == team2) & (games["away_team"] == team1))
         )
         games = games[matchup_mask].copy()
-    elif view_mode == "team":
+    elif view_mode == "team_games":
         if not team1:
             return pd.DataFrame()
         games = games[(games["home_team"] == team1) | (games["away_team"] == team1)].copy()
-    elif view_mode == "division":
+    elif view_mode == "team_primetime":
+        if not team1:
+            return pd.DataFrame()
         games = games[
-            games["division_home"].notna()
-            & games["division_home"].eq(games["division_away"])
+            ((games["home_team"] == team1) | (games["away_team"] == team1))
+            & games["is_primetime"]
         ].copy()
-        if team1:
-            games = games[(games["home_team"] == team1) | (games["away_team"] == team1)].copy()
-    elif view_mode == "playoffs":
+    elif view_mode == "team_playoffs":
         games = games[games["is_playoff"]].copy()
-        if team1:
-            games = games[(games["home_team"] == team1) | (games["away_team"] == team1)].copy()
-    elif view_mode == "all":
+        if not team1:
+            return pd.DataFrame()
+        games = games[(games["home_team"] == team1) | (games["away_team"] == team1)].copy()
+    elif view_mode == "team_divisional":
+        if not team1:
+            return pd.DataFrame()
+        games = games[
+            games["is_divisional"]
+            & ((games["home_team"] == team1) | (games["away_team"] == team1))
+        ].copy()
+    elif view_mode == "divisional_games":
+        games = games[games["is_divisional"]].copy()
+    elif view_mode == "all_playoffs":
+        games = games[games["is_playoff"]].copy()
+    elif view_mode == "all_primetime":
+        games = games[games["is_primetime"]].copy()
+    elif view_mode == "all_games":
         games = games.copy()
     else:
         return pd.DataFrame()
@@ -738,7 +749,9 @@ def render_matchup_card(row, idx):
                     <div style="text-align:right;">
                     <div style="font-size:0.9rem;color:#666;">{final_label}</div>
                     <div style="font-size:1.3rem;font-weight:700;">
-                        {int(row['away_score'])} - {int(row['home_score'])}
+                        <span style="color:{TEAM_COLORS.get(row['away_team'], '#333')};">{int(row['away_score'])}</span>
+                        <span style="color:#666;"> - </span>
+                        <span style="color:{TEAM_COLORS.get(row['home_team'], '#333')};">{int(row['home_score'])}</span>
                     </div>
                 </div>
                 """,
@@ -1728,7 +1741,6 @@ def create_ranking_figure(ranking_df, week_labels, title, subtitle, ascending):
     ax.text(1.055, -0.02, "Worst", transform=ax.transAxes, ha="center", va="top", fontsize=7.5, fontweight="bold")
 
     ax.set_title(title, fontsize=10.5, fontweight="bold", pad=5)
-    ax.text(0.5, 0.985, subtitle, fontsize=7.4, ha="center", transform=ax.transAxes, wrap=True)
     ax.set_xlabel("Season-Week", fontsize=8.5, labelpad=4)
 
     ax.spines["top"].set_visible(False)
@@ -1753,7 +1765,8 @@ def render_team_rankings_page(seasons):
 
     st.caption(
         f"Showing cumulative EPA per play rankings from {seasons[0]} through {seasons[-1]}. "
-        "Offense ranks best-to-worst by higher EPA/play; defense ranks best-to-worst by lower EPA/play allowed."
+        "Offense ranks best-to-worst by higher EPA/play; defense ranks best-to-worst by lower EPA/play allowed; "
+        "overall ranks by offensive EPA/play minus defensive EPA/play allowed."
     )
 
     chart_specs = [
@@ -1861,13 +1874,14 @@ def open_game_dialog(selected_game, team1, team2):
 
 
 sync_ui_state_from_query()
-inject_logo_picker_support()
 
 if "app_page_label" not in st.session_state:
     st.session_state["app_page_label"] = "Game Explorer"
 
 if "season_range" not in st.session_state:
-    st.session_state["season_range"] = (max(2006, LATEST_COMPLETED_SEASON - 4), LATEST_COMPLETED_SEASON)
+    default_start = min(max(2006, 2024), LATEST_COMPLETED_SEASON)
+    default_end = min(max(default_start, 2025), LATEST_COMPLETED_SEASON)
+    st.session_state["season_range"] = (default_start, default_end)
 
 with st.sidebar:
     selected_app_page_label = st.session_state["app_page_label"]
@@ -1884,7 +1898,7 @@ with st.sidebar:
         if selected_view_mode == "matchup":
             tm1 = render_logo_team_picker("selected_team_1", "First Team")
             tm2 = render_logo_team_picker("selected_team_2", "Second Team")
-        elif selected_view_mode in {"team", "division", "playoffs"}:
+        elif selected_view_mode in {"team_games", "team_primetime", "team_playoffs", "team_divisional"}:
             tm1 = render_logo_team_picker("selected_team_1", "Team")
             tm2 = None
         else:
@@ -1924,7 +1938,7 @@ if selected_view_mode == "matchup" and tm1 == tm2:
     st.warning("Choose two different teams.")
     st.stop()
 
-if selected_view_mode in {"team", "division", "playoffs"} and not tm1:
+if selected_view_mode in {"team_games", "team_primetime", "team_playoffs", "team_divisional"} and not tm1:
     st.info("Choose a team from the logo picker to load games.")
     st.stop()
 
@@ -1939,12 +1953,20 @@ matchup_games = prepare_game_catalog(schedule_df, selected_view_mode, tm1, tm2)
 
 if selected_view_mode == "matchup":
     st.caption(f"Showing {tm1} vs {tm2} from {seasons[0]} through {seasons[-1]}.")
-elif selected_view_mode == "team":
+elif selected_view_mode == "team_games":
     st.caption(f"Showing all {tm1} games from {seasons[0]} through {seasons[-1]}.")
-elif selected_view_mode == "division":
+elif selected_view_mode == "team_primetime":
+    st.caption(f"Showing all {tm1} primetime games from {seasons[0]} through {seasons[-1]}.")
+elif selected_view_mode == "team_playoffs":
+    st.caption(f"Showing all {tm1} playoff games from {seasons[0]} through {seasons[-1]}.")
+elif selected_view_mode == "team_divisional":
+    st.caption(f"Showing all {tm1} divisional games from {seasons[0]} through {seasons[-1]}.")
+elif selected_view_mode == "divisional_games":
     st.caption(f"Showing all divisional games from {seasons[0]} through {seasons[-1]}.")
-elif selected_view_mode == "playoffs":
+elif selected_view_mode == "all_playoffs":
     st.caption(f"Showing all playoff games from {seasons[0]} through {seasons[-1]}.")
+elif selected_view_mode == "all_primetime":
+    st.caption(f"Showing all primetime games from {seasons[0]} through {seasons[-1]}.")
 else:
     st.caption(f"Showing all completed games from {seasons[0]} through {seasons[-1]}.")
 
@@ -1953,7 +1975,7 @@ if matchup_games.empty:
     st.stop()
 
 games_to_render = matchup_games
-if selected_view_mode == "all":
+if selected_view_mode in PAGINATED_VIEW_MODES:
     total_games = len(matchup_games)
     total_pages = max(1, (total_games + ALL_GAMES_PAGE_SIZE - 1) // ALL_GAMES_PAGE_SIZE)
     current_page = max(1, min(st.session_state.get("all_games_page", 1), total_pages))
